@@ -1,0 +1,2 @@
+"""VANTA backend application."""
+
