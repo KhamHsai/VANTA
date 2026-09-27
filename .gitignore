@@ -30,6 +30,7 @@ htmlcov/
 venv/
 
 # Training data and generated model artifacts
+/data/
 training/data/
 training/datasets/
 training/checkpoints/
