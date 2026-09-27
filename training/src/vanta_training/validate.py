@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from vanta_training.dataset import save_validation_report, validate_dataset
+from vanta_training.dataset import save_validation_report, validate_dataset, validate_manifest
 
 
 def main() -> None:
@@ -13,11 +13,28 @@ def main() -> None:
         type=Path,
         default=Path("../data/alphatrash-dataset/trash_dataset"),
     )
-    parser.add_argument("--output", type=Path, default=Path("runs/dataset_validation.json"))
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("manifests/alphatrash_clean_splits.json"),
+    )
+    parser.add_argument(
+        "--original-splits",
+        action="store_true",
+        help="Audit the original folder splits instead of the clean manifest.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("runs/cleaned_dataset_validation.json"),
+    )
     arguments = parser.parse_args()
 
     try:
-        report = validate_dataset(arguments.data_dir)
+        if arguments.original_splits:
+            report = validate_dataset(arguments.data_dir)
+        else:
+            report = validate_manifest(arguments.data_dir, arguments.manifest)
     except (FileNotFoundError, ValueError) as error:
         raise SystemExit(f"Dataset validation failed: {error}") from error
     save_validation_report(report, arguments.output)
@@ -26,8 +43,10 @@ def main() -> None:
         count_summary = ", ".join(f"{name}={count}" for name, count in counts.items())
         print(f"{split}: {count_summary}")
     print(f"Missing or empty classes: {len(report.missing_classes)}")
+    print(f"Missing referenced images: {len(report.missing_images)}")
     print(f"Corrupt images: {len(report.corrupt_images)}")
     print(f"Unsupported files: {len(report.unsupported_files)}")
+    print(f"Content hash mismatches: {len(report.hash_mismatches)}")
     print(f"Exact duplicate groups across splits: {len(report.cross_split_duplicates)}")
     print(f"Full report: {arguments.output.resolve()}")
 

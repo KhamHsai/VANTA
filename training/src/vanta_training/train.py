@@ -21,7 +21,7 @@ from vanta_training.dataset import (
     AlphaTrashDataset,
     raise_for_dataset_issues,
     save_validation_report,
-    validate_dataset,
+    validate_manifest,
 )
 from vanta_training.device import select_device
 from vanta_training.engine import EpochMetrics, train_one_epoch, validate_one_epoch
@@ -40,14 +40,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--data-dir",
         type=Path,
         default=Path("../data/alphatrash-dataset/trash_dataset"),
-        help="Directory containing the original train, val, and test folders.",
+        help="Directory containing the unchanged AlphaTrash image folders.",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("manifests/alphatrash_clean_splits.json"),
+        help="Required leakage-free split manifest.",
     )
     parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/best_model.pt"))
     parser.add_argument("--metrics", type=Path, default=Path("runs/training_metrics.json"))
     parser.add_argument(
         "--validation-report",
         type=Path,
-        default=Path("runs/dataset_validation.json"),
+        default=Path("runs/cleaned_dataset_validation.json"),
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--stage-a-epochs", type=int, default=10)
@@ -65,11 +71,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
-    parser.add_argument(
-        "--allow-cross-split-duplicates",
-        action="store_true",
-        help="Continue only after manually reviewing duplicates in the validation report.",
-    )
     return parser
 
 
@@ -134,20 +135,25 @@ def run_training(arguments: argparse.Namespace) -> None:
     device = select_device(arguments.device)
     dataset_root = arguments.data_dir.resolve()
 
-    print(f"Validating dataset at {dataset_root} ...")
-    validation_report = validate_dataset(dataset_root)
+    manifest_path = arguments.manifest.resolve()
+    print(f"Validating clean manifest {manifest_path} ...")
+    validation_report = validate_manifest(dataset_root, manifest_path)
     save_validation_report(validation_report, arguments.validation_report)
-    raise_for_dataset_issues(
-        validation_report,
-        allow_cross_split_duplicates=arguments.allow_cross_split_duplicates,
-    )
+    raise_for_dataset_issues(validation_report)
     print(f"Validated {validation_report.total_images} images.")
+    manifest_metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     training_dataset = AlphaTrashDataset(
-        dataset_root, "train", transform=build_training_transform()
+        dataset_root,
+        manifest_path,
+        "train",
+        transform=build_training_transform(),
     )
     validation_dataset = AlphaTrashDataset(
-        dataset_root, "val", transform=build_inference_transform()
+        dataset_root,
+        manifest_path,
+        "val",
+        transform=build_inference_transform(),
     )
     data_loader_generator = torch.Generator().manual_seed(arguments.seed)
     training_loader = _build_data_loader(
@@ -181,6 +187,8 @@ def run_training(arguments: argparse.Namespace) -> None:
     run_started_at = datetime.now(UTC).isoformat()
     run_configuration = {
         "data_dir": str(dataset_root),
+        "manifest": str(manifest_path),
+        "manifest_id": manifest_metadata["manifest_id"],
         "batch_size": arguments.batch_size,
         "stage_a_epochs": arguments.stage_a_epochs,
         "stage_a_learning_rate": arguments.stage_a_learning_rate,
@@ -247,7 +255,8 @@ def run_training(arguments: argparse.Namespace) -> None:
                 epochs_without_improvement = 0
                 checkpoint_metadata = build_checkpoint_metadata(
                     source_dataset="Patipol-BKK/alphatrash-dataset",
-                    source_revision="33801d876c161b1e35073ebd401a6e2a0cdece3b",
+                    source_revision=manifest_metadata["source_revision"],
+                    split_manifest_id=manifest_metadata["manifest_id"],
                     best_epoch=global_epoch,
                     best_stage=stage_name,
                     validation_accuracy=best_accuracy,

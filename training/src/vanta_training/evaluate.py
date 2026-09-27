@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from vanta_training.checkpoint import load_checkpoint
 from vanta_training.constants import CLASS_TO_INDEX
-from vanta_training.dataset import AlphaTrashDataset
+from vanta_training.dataset import AlphaTrashDataset, raise_for_dataset_issues, validate_manifest
 from vanta_training.device import select_device
 from vanta_training.evaluation import evaluate_classifier, save_evaluation_results
 from vanta_training.transforms import build_inference_transform
@@ -22,6 +22,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--data-dir",
         type=Path,
         default=Path("../data/alphatrash-dataset/trash_dataset"),
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("manifests/alphatrash_clean_splits.json"),
     )
     parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/best_model.pt"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/evaluation"))
@@ -37,12 +42,19 @@ def run_evaluation(arguments: argparse.Namespace) -> dict[str, object]:
     if arguments.batch_size <= 0 or arguments.workers < 0:
         raise ValueError("batch size must be positive and workers cannot be negative.")
     device = select_device(arguments.device)
+    dataset_root = arguments.data_dir.resolve()
+    manifest_path = arguments.manifest.resolve()
+    raise_for_dataset_issues(validate_manifest(dataset_root, manifest_path))
     model, metadata = load_checkpoint(arguments.checkpoint, device)
     if metadata["class_to_index"] != CLASS_TO_INDEX:
         raise ValueError("Dataset and checkpoint class mappings do not match.")
+    manifest_id = json.loads(manifest_path.read_text(encoding="utf-8"))["manifest_id"]
+    if metadata.get("split_manifest_id") != manifest_id:
+        raise ValueError("Checkpoint was not trained with the selected split manifest.")
 
     test_dataset = AlphaTrashDataset(
-        arguments.data_dir.resolve(),
+        dataset_root,
+        manifest_path,
         "test",
         transform=build_inference_transform(),
     )

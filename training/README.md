@@ -10,12 +10,16 @@ Source: [Patipol-BKK/alphatrash-dataset](https://github.com/Patipol-BKK/alphatra
 
 The existing checkout was inspected at `../data/alphatrash-dataset/trash_dataset`. It retains the source `train`, `val`, and `test` splits. This checkout uses `plastic`; the loader also recognizes the `plasic` spelling documented in older upstream versions and maps either spelling to VANTA's canonical `plastic` class without renaming files.
 
-| Split | general | metal | organic | paper | plastic | Total |
-|---|---:|---:|---:|---:|---:|---:|
-| train | 833 | 746 | 574 | 627 | 1,206 | 3,986 |
-| val | 179 | 160 | 123 | 135 | 259 | 856 |
-| test | 178 | 159 | 122 | 133 | 257 | 849 |
-| total | 1,190 | 1,065 | 819 | 895 | 1,722 | 5,691 |
+| Split | Version | general | metal | organic | paper | plastic | Total |
+|---|---|---:|---:|---:|---:|---:|---:|
+| train | original | 833 | 746 | 574 | 627 | 1,206 | 3,986 |
+| train | clean | 833 | 639 | 574 | 627 | 1,065 | 3,738 |
+| val | original | 179 | 160 | 123 | 135 | 259 | 856 |
+| val | clean | 179 | 151 | 123 | 135 | 251 | 839 |
+| test | original | 178 | 159 | 122 | 133 | 257 | 849 |
+| test | clean | 177 | 157 | 122 | 132 | 251 | 839 |
+| total | original | 1,190 | 1,065 | 819 | 895 | 1,722 | 5,691 |
+| total | clean | 1,189 | 947 | 819 | 894 | 1,567 | 5,416 |
 
 All files in the inspected checkout use the `.jpeg` extension. Training reads only `train/` and `val/`; `test/` is loaded only by the separate evaluation command.
 
@@ -41,21 +45,37 @@ python -m pip install -e '.[dev]'
 
 PyTorch automatically uses the appropriate CPU/MPS build on macOS. On CUDA systems, follow the [official PyTorch installation selector](https://pytorch.org/get-started/locally/) first if a specific CUDA wheel is required, then install this project.
 
-## Validate the dataset
+## Generate leakage-free splits
 
-Validation checks every image, counts each class, reports unreadable/corrupt files, and hashes image bytes to find exact duplicates crossing split boundaries. It never deletes, moves, or relabels an image.
+Training and evaluation require `manifests/alphatrash_clean_splits.json`; they cannot silently fall back to the contaminated folder splits. The generator verifies and hashes every source image, then keeps one path per SHA-256 digest. For a digest found in multiple splits, the deterministic priority is **test, then validation, then training**. This preserves unique test examples wherever possible while preventing the same content from influencing model fitting or selection.
+
+The generator never modifies or copies an image. Paths in the manifest are relative to the dataset root, so the same file is portable to Kaggle. Regenerate it with:
 
 ```bash
 cd training
 source .venv/bin/activate
-python scripts/validate_dataset.py \
+python scripts/create_clean_manifest.py \
   --data-dir ../data/alphatrash-dataset/trash_dataset \
-  --output runs/dataset_validation.json
+  --output manifests/alphatrash_clean_splits.json \
+  --conflict-report runs/duplicate_label_conflicts.json
 ```
 
-Review `runs/dataset_validation.json`. Training stops on corrupt files, missing/empty classes, unsupported files, or cross-split duplicates. If duplicate groups are expected and have been reviewed, training can be explicitly allowed with `--allow-cross-split-duplicates`; the files remain unchanged.
+The current source contains one conflicting-label group: the exact same bytes appear as `test/general/28.jpeg` and `test/paper/28.jpeg`. Both references are excluded from the clean manifest and recorded for manual review; the generator never chooses a label. It also removes 273 redundant same-label references. All original files remain untouched.
 
-The completed local audit found no missing classes, corrupt images, or unsupported files. It did find **119 exact duplicate pairs across splits**: 57 train/validation, 51 train/test, and 11 validation/test. These are source files with names such as `pic1230.jpeg` and `pic1230 - Copy.jpeg`; the pipeline did not remove or move them. Review the JSON report before deciding whether to train with the original splits. Any metrics produced with these duplicates retained should disclose the resulting data-leakage limitation.
+## Validate the clean manifest
+
+Validation resolves every manifest path, opens every image, recomputes its SHA-256 digest, checks label/path consistency, counts every class, and verifies split isolation:
+
+```bash
+python scripts/validate_dataset.py \
+  --data-dir ../data/alphatrash-dataset/trash_dataset \
+  --manifest manifests/alphatrash_clean_splits.json \
+  --output runs/cleaned_dataset_validation.json
+```
+
+The verified clean manifest contains 5,416 images, all five classes in all three splits, zero missing or corrupt references, zero hash mismatches, and zero exact duplicates across splits. Its deterministic ID is `5fe461138fdbc07c2b591209d9865a50db14420fca9f34e2ec45e55914586464`.
+
+To audit the unchanged original folders again, add `--original-splits` and choose a separate report path.
 
 ## Train
 
@@ -66,6 +86,7 @@ Classifier stage only:
 ```bash
 python scripts/train.py \
   --data-dir ../data/alphatrash-dataset/trash_dataset \
+  --manifest manifests/alphatrash_clean_splits.json \
   --batch-size 32 \
   --stage-a-epochs 10 \
   --stage-a-learning-rate 0.001 \
@@ -78,6 +99,7 @@ Classifier training followed by fine-tuning:
 ```bash
 python scripts/train.py \
   --data-dir ../data/alphatrash-dataset/trash_dataset \
+  --manifest manifests/alphatrash_clean_splits.json \
   --batch-size 32 \
   --stage-a-epochs 10 \
   --stage-a-learning-rate 0.001 \
@@ -88,13 +110,7 @@ python scripts/train.py \
   --seed 42
 ```
 
-The best validation checkpoint is written to `checkpoints/best_model.pt`, and per-epoch metrics are written to `runs/training_metrics.json`. The test split is not used during training or checkpoint selection. Use `--device cpu`, `--device mps`, or `--device cuda` to override automatic device selection.
-
-With the currently verified checkout, the commands above intentionally stop at the duplicate safety check. To preserve the upstream splits and proceed after accepting and documenting the leakage risk, append:
-
-```bash
---allow-cross-split-duplicates
-```
+The best validation checkpoint is written to `checkpoints/best_model.pt`, and per-epoch metrics are written to `runs/training_metrics.json`. The checkpoint records the manifest ID, and evaluation rejects a checkpoint created from a different manifest. The test split is not used during training or checkpoint selection. Use `--device cpu`, `--device mps`, or `--device cuda` to override automatic device selection.
 
 For an M1 Mac with 8 GB RAM, begin with `--device mps --batch-size 16 --workers 2`. Reduce the batch size to 8 if memory pressure is high. The saved checkpoint contains CPU tensors and loads portably on macOS even when trained on CUDA.
 
@@ -105,6 +121,7 @@ Run this after model selection is complete:
 ```bash
 python scripts/evaluate.py \
   --data-dir ../data/alphatrash-dataset/trash_dataset \
+  --manifest manifests/alphatrash_clean_splits.json \
   --checkpoint checkpoints/best_model.pt \
   --output-dir outputs/evaluation \
   --device auto
@@ -135,7 +152,7 @@ ruff check src tests scripts
 
 ## Kaggle free-GPU workflow
 
-Create a Kaggle notebook, enable **Settings → Accelerator → GPU**, and add the VANTA repository plus AlphaTrash as notebook inputs or upload them as private Kaggle datasets. Then use these cells, adjusting the two input paths shown by Kaggle:
+Create a Kaggle notebook, enable **Settings → Accelerator → GPU**, and add the VANTA repository plus the same AlphaTrash revision as notebook inputs or private Kaggle datasets. The committed manifest is portable because it contains dataset-relative paths. Regenerate it on Kaggle to confirm the same manifest ID:
 
 ```python
 %cd /kaggle/input/vanta/VANTA/training
@@ -143,17 +160,27 @@ Create a Kaggle notebook, enable **Settings → Accelerator → GPU**, and add t
 ```
 
 ```python
+!python scripts/create_clean_manifest.py \
+    --data-dir /kaggle/input/alphatrash-dataset/trash_dataset \
+    --output /kaggle/working/alphatrash_clean_splits.json \
+    --conflict-report /kaggle/working/duplicate_label_conflicts.json \
+    --source-revision 33801d876c161b1e35073ebd401a6e2a0cdece3b
+```
+
+```python
 !python scripts/validate_dataset.py \
     --data-dir /kaggle/input/alphatrash-dataset/trash_dataset \
-    --output /kaggle/working/dataset_validation.json
+    --manifest /kaggle/working/alphatrash_clean_splits.json \
+    --output /kaggle/working/cleaned_dataset_validation.json
 ```
 
 ```python
 !python scripts/train.py \
     --data-dir /kaggle/input/alphatrash-dataset/trash_dataset \
+    --manifest /kaggle/working/alphatrash_clean_splits.json \
     --checkpoint /kaggle/working/best_model.pt \
     --metrics /kaggle/working/training_metrics.json \
-    --validation-report /kaggle/working/dataset_validation.json \
+    --validation-report /kaggle/working/cleaned_dataset_validation.json \
     --device cuda \
     --batch-size 64 \
     --stage-a-epochs 10 \
@@ -161,12 +188,13 @@ Create a Kaggle notebook, enable **Settings → Accelerator → GPU**, and add t
     --early-stopping-patience 3
 ```
 
-Download `best_model.pt`, `training_metrics.json`, and `dataset_validation.json` from Kaggle's `/kaggle/working` output panel. Place the checkpoint at `training/checkpoints/best_model.pt` locally, then use the evaluation or prediction commands above. Do not evaluate repeatedly on the test set while tuning the model.
+Confirm the regenerated ID is `5fe461138fdbc07c2b591209d9865a50db14420fca9f34e2ec45e55914586464`. Download `best_model.pt`, `training_metrics.json`, and `cleaned_dataset_validation.json` from Kaggle's `/kaggle/working` output panel. Place the checkpoint at `training/checkpoints/best_model.pt` locally, then use the evaluation or prediction commands above. Do not evaluate repeatedly on the test set while tuning the model.
 
 ## Package layout
 
 ```text
 training/
+├── manifests/             # Portable, versioned clean split assignments
 ├── pyproject.toml
 ├── scripts/               # Thin command-line entry points
 ├── src/vanta_training/    # Dataset, model, training, evaluation, prediction

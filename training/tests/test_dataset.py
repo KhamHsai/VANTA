@@ -10,7 +10,9 @@ from vanta_training.dataset import (
     canonicalize_source_label,
     raise_for_dataset_issues,
     validate_dataset,
+    validate_manifest,
 )
+from vanta_training.manifest import build_clean_manifest, save_clean_manifest
 
 
 def test_source_label_aliases_include_original_misspelling() -> None:
@@ -18,8 +20,21 @@ def test_source_label_aliases_include_original_misspelling() -> None:
     assert canonicalize_source_label("plasic") == "plastic"
 
 
-def test_dataset_loads_all_classes_with_stable_mapping(synthetic_dataset: Path) -> None:
-    dataset = AlphaTrashDataset(synthetic_dataset, "train", transforms.ToTensor())
+def test_dataset_loads_manifest_with_stable_mapping(
+    synthetic_dataset: Path,
+    tmp_path: Path,
+) -> None:
+    result = build_clean_manifest(synthetic_dataset, source_revision="test-revision")
+    assert result.manifest is not None
+    manifest_path = tmp_path / "splits.json"
+    save_clean_manifest(result.manifest, manifest_path)
+
+    dataset = AlphaTrashDataset(
+        synthetic_dataset,
+        manifest_path,
+        "train",
+        transforms.ToTensor(),
+    )
 
     assert len(dataset) == 5
     assert dataset.class_to_index == CLASS_TO_INDEX
@@ -37,6 +52,7 @@ def test_validation_counts_images_and_detects_no_initial_issues(
     assert report.total_images == 15
     assert all(count == 1 for split in report.image_counts.values() for count in split.values())
     assert report.missing_classes == []
+    assert report.missing_images == []
     assert report.corrupt_images == []
     assert report.cross_split_duplicates == []
 
@@ -55,3 +71,22 @@ def test_validation_detects_corruption_and_cross_split_duplicate(
     assert len(report.cross_split_duplicates) == 1
     with pytest.raises(ValueError, match="Dataset validation failed"):
         raise_for_dataset_issues(report)
+
+
+def test_clean_manifest_validation_has_no_split_leakage(
+    synthetic_dataset: Path,
+    tmp_path: Path,
+) -> None:
+    result = build_clean_manifest(synthetic_dataset, source_revision="test-revision")
+    assert result.manifest is not None
+    manifest_path = tmp_path / "splits.json"
+    save_clean_manifest(result.manifest, manifest_path)
+
+    report = validate_manifest(synthetic_dataset, manifest_path)
+
+    assert report.total_images == 15
+    assert report.missing_classes == []
+    assert report.missing_images == []
+    assert report.corrupt_images == []
+    assert report.hash_mismatches == []
+    assert report.cross_split_duplicates == []
