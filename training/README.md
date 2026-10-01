@@ -152,49 +152,96 @@ ruff check src tests scripts
 
 ## Kaggle free-GPU workflow
 
-Create a Kaggle notebook, enable **Settings → Accelerator → GPU**, and add the VANTA repository plus the same AlphaTrash revision as notebook inputs or private Kaggle datasets. The committed manifest is portable because it contains dataset-relative paths. Regenerate it on Kaggle to confirm the same manifest ID:
+Use the ready-to-import notebook at `notebooks/vanta_kaggle_training.ipynb`. Full training is disabled in the notebook until its smoke test passes.
 
-```python
-%cd /kaggle/input/vanta/VANTA/training
-!python -m pip install -q -e .
+### 1. Prepare Kaggle inputs
+
+Create two private Kaggle Datasets through **Datasets → New Dataset**:
+
+1. Upload the VANTA `training/` directory, including `pyproject.toml`, `src/`, `scripts/`, and `manifests/`. This is small and contains no credentials.
+2. Upload the unchanged `data/alphatrash-dataset/trash_dataset/` directory. Do not flatten or rename its `train`, `val`, and `test` folders.
+
+Import `vanta_kaggle_training.ipynb` into Kaggle, attach both datasets through **Add Input**, and select **Settings → Accelerator → GPU**. Update only `PROJECT_INPUT` and `DATASET_ROOT` in the first code cell to match the paths displayed in Kaggle's Input panel.
+
+The notebook copies only the training code to `/kaggle/working`; it reads all 4.7 GB of images directly from the read-only dataset input. It regenerates the manifest and stops unless its ID is exactly:
+
+```text
+5fe461138fdbc07c2b591209d9865a50db14420fca9f34e2ec45e55914586464
 ```
 
-```python
-!python scripts/create_clean_manifest.py \
-    --data-dir /kaggle/input/alphatrash-dataset/trash_dataset \
-    --output /kaggle/working/alphatrash_clean_splits.json \
-    --conflict-report /kaggle/working/duplicate_label_conflicts.json \
-    --source-revision 33801d876c161b1e35073ebd401a6e2a0cdece3b
-```
+### 2. Pretrained weights with internet disabled
+
+With Kaggle internet enabled, TorchVision downloads and caches `MobileNet_V3_Small_Weights.DEFAULT` automatically during the smoke test. With internet disabled, download the official `mobilenet_v3_small-047dcff4.pth` file in an internet-enabled environment, upload it as a third private Kaggle Dataset, attach it to the notebook, and set:
 
 ```python
-!python scripts/validate_dataset.py \
-    --data-dir /kaggle/input/alphatrash-dataset/trash_dataset \
-    --manifest /kaggle/working/alphatrash_clean_splits.json \
-    --output /kaggle/working/cleaned_dataset_validation.json
+PRETRAINED_WEIGHTS = Path(
+    "/kaggle/input/mobilenet-v3-small-weights/mobilenet_v3_small-047dcff4.pth"
+)
 ```
 
-```python
-!python scripts/train.py \
-    --data-dir /kaggle/input/alphatrash-dataset/trash_dataset \
-    --manifest /kaggle/working/alphatrash_clean_splits.json \
-    --checkpoint /kaggle/working/best_model.pt \
-    --metrics /kaggle/working/training_metrics.json \
-    --validation-report /kaggle/working/cleaned_dataset_validation.json \
-    --device cuda \
-    --batch-size 64 \
-    --stage-a-epochs 10 \
-    --stage-b-epochs 8 \
-    --early-stopping-patience 3
+Both smoke testing and full training use this same path. The loader verifies that it is a compatible TorchVision MobileNetV3-Small state dictionary before replacing the classifier.
+
+### 3. Smoke test
+
+The notebook runs `scripts/kaggle_smoke_test.py` before training. It requires CUDA, verifies all 5,416 manifest paths and SHA-256 hashes, checks the manifest ID, loads pretrained weights once, loads training and validation batches with batch size 16 and two workers, then performs one mixed-precision training step and one validation forward pass. It writes `/kaggle/working/vanta-output/smoke_test.json` and does not save the smoke-test model.
+
+### 4. Full training command
+
+The notebook prints this command and runs it only after `RUN_FULL_TRAINING = True`:
+
+```bash
+python scripts/train.py \
+  --data-dir /kaggle/input/alphatrash-dataset/trash_dataset \
+  --manifest /kaggle/working/vanta-output/alphatrash_clean_splits.json \
+  --checkpoint /kaggle/working/vanta-output/best_model.pt \
+  --metrics /kaggle/working/vanta-output/training_metrics.json \
+  --class-mapping /kaggle/working/vanta-output/class_mapping.json \
+  --validation-report /kaggle/working/vanta-output/cleaned_dataset_validation.json \
+  --device cuda \
+  --batch-size 16 \
+  --workers 2 \
+  --stage-a-epochs 10 \
+  --stage-a-learning-rate 0.001 \
+  --stage-b-epochs 8 \
+  --stage-b-learning-rate 0.0001 \
+  --unfreeze-blocks 3 \
+  --early-stopping-patience 3 \
+  --seed 42
 ```
 
-Confirm the regenerated ID is `5fe461138fdbc07c2b591209d9865a50db14420fca9f34e2ec45e55914586464`. Download `best_model.pt`, `training_metrics.json`, and `cleaned_dataset_validation.json` from Kaggle's `/kaggle/working` output panel. Place the checkpoint at `training/checkpoints/best_model.pt` locally, then use the evaluation or prediction commands above. Do not evaluate repeatedly on the test set while tuning the model.
+Append `--pretrained-weights /kaggle/input/.../mobilenet_v3_small-047dcff4.pth` when using the offline weight input.
+
+This command does not evaluate the final test set. It writes the best checkpoint, class mapping, manifest ID, full epoch history, best validation metrics, clean validation report, and smoke report under `/kaggle/working/vanta-output/`.
+
+### 5. Download and use on an M1 Mac
+
+After training, run the notebook's packaging cell and save a notebook version. Download `vanta-training-artifacts.zip` from Kaggle's Output panel, then locally:
+
+```bash
+cd /path/to/VANTA/training
+unzip ~/Downloads/vanta-training-artifacts.zip -d kaggle-output
+mkdir -p checkpoints
+cp kaggle-output/best_model.pt checkpoints/best_model.pt
+
+# Apple Metal
+python scripts/predict.py /path/to/image.jpeg \
+  --checkpoint checkpoints/best_model.pt \
+  --device mps
+
+# CPU fallback
+python scripts/predict.py /path/to/image.jpeg \
+  --checkpoint checkpoints/best_model.pt \
+  --device cpu
+```
+
+The checkpoint stores CPU tensors, the five-class mapping, preprocessing metadata, source revision, manifest ID, and best validation metrics, so it is portable from Kaggle CUDA to macOS CPU or MPS.
 
 ## Package layout
 
 ```text
 training/
 ├── manifests/             # Portable, versioned clean split assignments
+├── notebooks/             # Kaggle workflow with training disabled by default
 ├── pyproject.toml
 ├── scripts/               # Thin command-line entry points
 ├── src/vanta_training/    # Dataset, model, training, evaluation, prediction

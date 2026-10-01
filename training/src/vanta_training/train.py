@@ -50,6 +50,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/best_model.pt"))
     parser.add_argument("--metrics", type=Path, default=Path("runs/training_metrics.json"))
+    parser.add_argument("--class-mapping", type=Path, default=Path("runs/class_mapping.json"))
     parser.add_argument(
         "--validation-report",
         type=Path,
@@ -71,6 +72,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    parser.add_argument(
+        "--pretrained-weights",
+        type=Path,
+        help="Optional local ImageNet weight file for offline environments.",
+    )
     return parser
 
 
@@ -142,6 +148,13 @@ def run_training(arguments: argparse.Namespace) -> None:
     raise_for_dataset_issues(validation_report)
     print(f"Validated {validation_report.total_images} images.")
     manifest_metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _write_metrics(
+        arguments.class_mapping,
+        {
+            "class_to_index": dict(CLASS_TO_INDEX),
+            "manifest_id": manifest_metadata["manifest_id"],
+        },
+    )
 
     training_dataset = AlphaTrashDataset(
         dataset_root,
@@ -174,7 +187,10 @@ def run_training(arguments: argparse.Namespace) -> None:
     )
 
     print(f"Using device: {device}")
-    model = build_model(pretrained=True)
+    model = build_model(
+        pretrained=arguments.pretrained_weights is None,
+        pretrained_weights_path=arguments.pretrained_weights,
+    )
     freeze_feature_extractor(model)
     model.to(device)
     loss_function = nn.CrossEntropyLoss()
@@ -200,6 +216,11 @@ def run_training(arguments: argparse.Namespace) -> None:
         "seed": arguments.seed,
         "workers": arguments.workers,
         "device": str(device),
+        "pretrained_weights": (
+            str(arguments.pretrained_weights.resolve())
+            if arguments.pretrained_weights
+            else "torchvision"
+        ),
     }
 
     stages = [("classifier", arguments.stage_a_epochs, arguments.stage_a_learning_rate)]
