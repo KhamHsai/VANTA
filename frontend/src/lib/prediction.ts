@@ -1,6 +1,7 @@
 export const wasteCategories = ["general", "metal", "organic", "paper", "plastic"] as const;
 
 export type WasteCategory = (typeof wasteCategories)[number];
+export type PredictionSource = "camera" | "upload";
 
 export interface PredictionResponse {
   label: WasteCategory;
@@ -13,10 +14,12 @@ const defaultApiBaseUrl = "http://127.0.0.1:8000";
 
 export async function predictWasteImage(
   imageFile: File,
+  sourceType: PredictionSource,
   signal?: AbortSignal,
 ): Promise<PredictionResponse> {
   const formData = new FormData();
   formData.append("file", imageFile);
+  formData.append("source_type", sourceType);
 
   let response: Response;
   try {
@@ -80,7 +83,7 @@ export function parsePredictionResponse(payload: unknown): PredictionResponse {
   };
 }
 
-function getApiBaseUrl(): string {
+export function getApiBaseUrl(): string {
   return (process.env.NEXT_PUBLIC_API_BASE_URL || defaultApiBaseUrl).replace(/\/+$/, "");
 }
 

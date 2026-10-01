@@ -8,24 +8,16 @@ import pytest
 import torch
 from fastapi.testclient import TestClient
 from PIL import Image
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 from torch import nn
 
 from app.core.config import Settings, get_settings
+from app.db.session import get_db_session
 from app.main import app
 from app.ml.inference import EXPECTED_CLASSES, ImageInferenceService, get_inference_service
-
-
-@pytest.fixture(scope="module")
-def inference_service() -> ImageInferenceService:
-    return get_inference_service()
-
-
-@pytest.fixture
-def client(inference_service: ImageInferenceService) -> TestClient:
-    app.dependency_overrides[get_inference_service] = lambda: inference_service
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+from app.models import PredictionHistory
 
 
 def create_test_image(image_format: str = "JPEG") -> bytes:
@@ -48,10 +40,14 @@ def test_real_checkpoint_mapping_and_output_dimensions(
     assert get_inference_service() is inference_service
 
 
-def test_valid_image_returns_ordered_probability_scores(client: TestClient) -> None:
+def test_valid_image_returns_ordered_probability_scores(
+    client: TestClient,
+    db_session: Session,
+) -> None:
     response = client.post(
         "/api/v1/predict",
         files={"file": ("waste.jpg", create_test_image(), "image/jpeg")},
+        data={"source_type": "camera"},
     )
 
     assert response.status_code == 200
@@ -63,6 +59,12 @@ def test_valid_image_returns_ordered_probability_scores(client: TestClient) -> N
     assert all(0.0 <= score <= 1.0 for score in payload["scores"].values())
     assert sum(payload["scores"].values()) == pytest.approx(1.0, abs=1e-5)
     assert payload["confidence"] == pytest.approx(max(payload["scores"].values()))
+
+    saved_record = db_session.scalar(select(PredictionHistory))
+    assert saved_record is not None
+    assert saved_record.predicted_label == payload["label"]
+    assert saved_record.source_type == "camera"
+    assert saved_record.confidence == pytest.approx(payload["confidence"])
 
 
 def test_confidence_threshold_marks_low_confidence_prediction(
@@ -138,3 +140,33 @@ def test_model_runs_in_inference_mode(inference_service: ImageInferenceService) 
     assert gradient_states == [False]
     assert result.label in EXPECTED_CLASSES
     assert result.inference_time_ms > 0.0
+
+
+def test_prediction_returns_safe_error_when_history_cannot_be_saved(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    class FailingSession:
+        def add(self, _record: object) -> None:
+            pass
+
+        def commit(self) -> None:
+            raise SQLAlchemyError("database unavailable")
+
+        def rollback(self) -> None:
+            pass
+
+    app.dependency_overrides[get_db_session] = FailingSession
+    try:
+        response = client.post(
+            "/api/v1/predict",
+            files={"file": ("waste.jpg", create_test_image(), "image/jpeg")},
+            data={"source_type": "upload"},
+        )
+    finally:
+        app.dependency_overrides[get_db_session] = lambda: db_session
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Prediction succeeded, but VANTA could not save the result. Please try again."
+    )

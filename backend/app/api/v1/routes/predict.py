@@ -1,14 +1,21 @@
 """Waste image prediction endpoint."""
 
+import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.db.session import get_db_session
 from app.ml.inference import ImageInferenceService, InvalidImageError, get_inference_service
+from app.schemas.history import PredictionSource
 from app.schemas.prediction import PredictionResponse
+from app.services.prediction_history import create_prediction_record
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
@@ -18,6 +25,8 @@ async def predict_waste(
     file: Annotated[UploadFile, File(description="JPEG, PNG, or WebP waste image")],
     inference_service: Annotated[ImageInferenceService, Depends(get_inference_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    session: Annotated[Session, Depends(get_db_session)],
+    source_type: Annotated[PredictionSource, Form()] = "upload",
 ) -> PredictionResponse:
     """Classify one uploaded waste image using the production checkpoint."""
 
@@ -50,6 +59,22 @@ async def predict_waste(
         ) from error
     finally:
         await file.close()
+
+    try:
+        create_prediction_record(
+            session,
+            predicted_label=result.label,
+            confidence=result.confidence,
+            is_uncertain=result.is_uncertain,
+            scores=result.scores,
+            source_type=source_type,
+        )
+    except SQLAlchemyError as error:
+        logger.exception("Prediction completed but its history record could not be saved")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Prediction succeeded, but VANTA could not save the result. Please try again.",
+        ) from error
 
     return PredictionResponse(
         label=result.label,

@@ -4,7 +4,11 @@ import Image from "next/image";
 import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { predictWasteImage, wasteCategories } from "@/lib/prediction";
-import type { PredictionResponse, WasteCategory } from "@/lib/prediction";
+import type {
+  PredictionResponse,
+  PredictionSource,
+  WasteCategory,
+} from "@/lib/prediction";
 
 type InputMode = "camera" | "upload";
 type CameraStatus = "idle" | "starting" | "ready" | "error";
@@ -143,7 +147,7 @@ export default function ScanInterface() {
     }
   }, [clearPreview, clearResult, stopCamera]);
 
-  const requestPrediction = useCallback(async (file: File) => {
+  const requestPrediction = useCallback(async (file: File, sourceType: PredictionSource) => {
     predictionRequestRef.current?.abort();
     const controller = new AbortController();
     predictionRequestRef.current = controller;
@@ -152,7 +156,7 @@ export default function ScanInterface() {
     setIsPredicting(true);
 
     try {
-      const result = await predictWasteImage(file, controller.signal);
+      const result = await predictWasteImage(file, sourceType, controller.signal);
       if (!controller.signal.aborted) {
         setPrediction(result);
       }
@@ -205,7 +209,7 @@ export default function ScanInterface() {
     });
     showPreview(capturedFile);
     stopCamera();
-    await requestPrediction(capturedFile);
+    await requestPrediction(capturedFile, "camera");
   }, [cameraStatus, requestPrediction, showPreview, stopCamera]);
 
   const handleFileSelection = (event: ChangeEvent<HTMLInputElement>) => {
@@ -353,14 +357,14 @@ export default function ScanInterface() {
                   !errorMessage && (
                   <PrimaryButton
                     disabled={isPredicting}
-                    onClick={() => void requestPrediction(selectedFile)}
+                    onClick={() => void requestPrediction(selectedFile, "upload")}
                   >
                     Identify item
                   </PrimaryButton>
                 )}
 
                 {previewUrl && selectedFile && !isPredicting && errorMessage && (
-                  <PrimaryButton onClick={() => void requestPrediction(selectedFile)}>
+                  <PrimaryButton onClick={() => void requestPrediction(selectedFile, inputMode)}>
                     Try prediction again
                   </PrimaryButton>
                 )}
