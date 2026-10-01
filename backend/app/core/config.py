@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     mysql_port: int = 3308
     mysql_database: str = "vanta"
     database_url_override: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    prediction_confidence_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    prediction_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
 
     model_config = SettingsConfigDict(
         env_file=(REPOSITORY_ROOT / ".env", BACKEND_DIR / ".env"),
