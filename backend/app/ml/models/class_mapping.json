@@ -1,0 +1,10 @@
+{
+  "class_to_index": {
+    "general": 0,
+    "metal": 1,
+    "organic": 2,
+    "paper": 3,
+    "plastic": 4
+  },
+  "manifest_id": "5fe461138fdbc07c2b591209d9865a50db14420fca9f34e2ec45e55914586464"
+}

@@ -55,3 +55,8 @@ temp/
 
 /data/
 /training/artifacts/
+
+# Keep VANTA's final production model in Git
+!backend/app/ml/models/
+!backend/app/ml/models/best_model.pt
+!backend/app/ml/models/class_mapping.json
